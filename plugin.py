@@ -21,11 +21,15 @@ class BasePlugin:
     def __init__(self):
         self.macs = None
         self._connection = None  # connection handle
+        self.ack = None
+        self.command_state = None
+        self.command_trgt = None
+        self.command_addr = None
         return
 
     def onStart(self):
         Domoticz.Log("onStart called")
-        Domoticz.Heartbeat(30)
+        Domoticz.Heartbeat(1)
         Domoticz.Log('Mode6: %s' %Parameters["Mode6"])
         list_macs = (Parameters["Mode4"].strip()).split(',')
         self.macs = []
@@ -42,7 +46,7 @@ class BasePlugin:
             if addr not in list_device_mac:
                 Domoticz.Log('Create Widget for %s' %addr)
                 unit = len(Devices) + 1
-                Options = {"LevelActions": "||||||||||||||||", "LevelNames": "Off|Cmd1|Cmd2|Cmd3|Cmd4|Cmd5|Cmd6|Cmd7|Cmd8|Cmd9|Cmd10|Cmd11|Cmd12|Cmd13|Cmd14|Cmd15|Cmd16",
+                Options = {"LevelActions": "||||||||||||||||", "LevelNames": "Off|Cmd1|Cmd2|Cmd3|Cmd4|Cmd5|Cmd6|Cmd7|Cmd8|Cmd9|Cmd10|Cmd11|Cmd12|Cmd13|Cmd14|Cmd15",
                            "LevelOffHidden": "false", "SelectorStyle": "1"}
                 myDev = Domoticz.Device(DeviceID=addr, Name="Clim " + addr, Unit=unit, Type=244, Subtype=62, Switchtype=18, Options=Options)
                 myDev.Create()
@@ -54,15 +58,21 @@ class BasePlugin:
         # Open Connection
         self._connection = Domoticz.Connection(Name="MyHome direct API", Transport="TCP/IP", Protocol="None ", Address=Parameters["Address"], Port=Parameters["Port"])
         Domoticz.Log("Connection set: %s" %self._connection)
+        return
 
     def onConnect(self, Connection, Status, Description):
         if (Status == 0):
             Domoticz.Log("Connected successfully to: "+Connection.Address+":"+Connection.Port)
         else:
             Domoticz.Log("Failed to connect ("+str(Status)+") to: "+Connection.Address+":"+Connection.Port+" with error: "+Description)
+        return
 
     def onCommand(self, Unit, Command, Level, Color):
         Domoticz.Log( "onCommand - unit: %s, command: %s, level: %s, color: %s" %(Unit, Command, Level, Color))
+
+        if self.command_trgt or self.command_addr or self.ack:
+            Domoticz.Error("There is already command in progress - Cmd: %s Addr: %s" %(self.command_trgt, self.command_addr))
+            return
 
         #Retreive device addr
         addr = Devices[Unit].DeviceID
@@ -70,45 +80,67 @@ class BasePlugin:
         if Command == 'Off':
             Domoticz.Log("Command Off send to %s" %addr)
             send_command( self._connection, addr, 0)
+            # Open channel
+            self.command_state = 'Open Channel'
+            self.command_trgt = 1
+            self.command_addr = addr
+            self.ack = False
         elif Command == 'Set Level':
-            # Levels are from 10 to 160
+            # Levels are from 10 to 150
             Domoticz.Log("Command Level: %s send to %s" %(Level, addr))
-            send_command( self._connection, addr, int(Level)//10 )
+            # Open channel
+            self.command_state = 'Open Channel'
+            self.command_trgt = (int(Level)+10)//10
+            self.command_addr = addr
+            self.ack = False
+        return
 
     def onMessage(self, Connection, Data):
         Domoticz.Log("onMessage called for connection: "+Connection.Address+":"+Connection.Port)
         Domoticz.Log("==== Data: %s" %(Data))
+        self.ack = True
+        return
         
     def onDisconnect(self, Connection):
         Domoticz.Log("onDisconnect called for connection '"+Connection.Name+"'.")
+        return
 
     def onHeartbeat(self):
-        Domoticz.Log("onHeartbeat")
+        Domoticz.Log("onHeartbeat - ack: %s state: %s trgt: %s addr: %s" \
+                %(self.ack, self.command_state, self.command_trgt, self.command_addr))
+
+        if self.command_state == 'Open Channel':
+            self.ack = False
+            self.command_state = 'Send Command'
+            # Ouverture d'une session Command
+            self._connection.Connect()
+            data = '*99*0##'
+            self._connection.Send(data.encode(), 1)
+            Domoticz.Log("==> %s sent" %data.encode())
+
+        if self.command_state == 'Send Command' and self.ack:
+            self.ack = False
+            self.command_state = 'Close Channel'
+            # Command
+            data = '*0*'
+            data += str(self.command_trgt)
+            data += '*'
+            data += self.command_addr
+            data += '##'
+            self._connection.Send(data.encode(), 1)
+            Domoticz.Log("==> %s sent" %data.encode())
+
+        if self.command_state == 'Close Channel' and self.ack:
+            # Close
+            connection.Disconnect()
+
+            self.ack = False
+            self.command_state = None
+            self.command_trgt = None
+            self.command_addr = None
 
         return
 
-def send_command( connection, addr, cmd):
-    
-    # Open channe
-    connection.Connect()
-
-    # Ouverture d'une session Command
-    # Response will be received by onMessage. Need to see how it behaves
-    data = '*99*0##'
-    connection.Send(data.encode(), 1)
-    Domoticz.Log("==> %s sent" %data.encode())
-
-    # Command
-    data = '*0*'
-    data += str(cmd)
-    data += '*'
-    data += addr
-    data += '##'
-    connection.Send(data.encode(), 1)
-    Domoticz.Log("==> %s sent" %data.encode())
-
-    # Close
-    connection.Disconnect()
 
 
 global _plugin
