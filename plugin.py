@@ -25,6 +25,7 @@ class BasePlugin:
         self.command_state = None
         self.command_trgt = None
         self.command_addr = None
+        self.TimedOut = 0
         return
 
     def onStart(self):
@@ -46,7 +47,7 @@ class BasePlugin:
             if addr not in list_device_mac:
                 Domoticz.Log('Create Widget for %s' %addr)
                 unit = len(Devices) + 1
-                Options = {"LevelActions": "||||||||||||||||", "LevelNames": "Off|Cmd1|Cmd2|Cmd3|Cmd4|Cmd5|Cmd6|Cmd7|Cmd8|Cmd9|Cmd10|Cmd11|Cmd12|Cmd13|Cmd14|Cmd15",
+                Options = {"LevelActions": "||||||||||||||||", "LevelNames": "Off|Cmd2|Cmd3|Cmd4|Cmd5|Cmd6|Cmd7|Cmd8|Cmd9|Cmd10|Cmd11|Cmd12|Cmd13|Cmd14|Cmd15|Cmd16",
                            "LevelOffHidden": "false", "SelectorStyle": "1"}
                 myDev = Domoticz.Device(DeviceID=addr, Name="Clim " + addr, Unit=unit, Type=244, Subtype=62, Switchtype=18, Options=Options)
                 myDev.Create()
@@ -74,12 +75,12 @@ class BasePlugin:
             Domoticz.Error("There is already command in progress - Cmd: %s Addr: %s" %(self.command_trgt, self.command_addr))
             return
 
+        self.TimedOut = 0
         #Retreive device addr
         addr = Devices[Unit].DeviceID
 
         if Command == 'Off':
             Domoticz.Log("Command Off send to %s" %addr)
-            send_command( self._connection, addr, 0)
             # Open channel
             self.command_state = 'Open Channel'
             self.command_trgt = 1
@@ -96,8 +97,8 @@ class BasePlugin:
         return
 
     def onMessage(self, Connection, Data):
-        Domoticz.Log("onMessage called for connection: "+Connection.Address+":"+Connection.Port)
-        Domoticz.Log("==== Data: %s" %(Data))
+        #Domoticz.Log("onMessage called for connection: "+Connection.Address+":"+Connection.Port)
+        Domoticz.Log("==== Received data: %s" %(Data))
         self.ack = True
         return
         
@@ -106,10 +107,15 @@ class BasePlugin:
         return
 
     def onHeartbeat(self):
+
+        if self.command_state is None:
+            return
+        self.TimedOut += 1
         Domoticz.Log("onHeartbeat - ack: %s state: %s trgt: %s addr: %s" \
                 %(self.ack, self.command_state, self.command_trgt, self.command_addr))
 
         if self.command_state == 'Open Channel':
+            # Open Channel , next step is Send Command
             self.ack = False
             self.command_state = 'Send Command'
             # Ouverture d'une session Command
@@ -118,7 +124,8 @@ class BasePlugin:
             self._connection.Send(data.encode(), 1)
             Domoticz.Log("==> %s sent" %data.encode())
 
-        if self.command_state == 'Send Command' and self.ack:
+        elif self.command_state == 'Send Command' and self.ack:
+            # send command, next step is close channel
             self.ack = False
             self.command_state = 'Close Channel'
             # Command
@@ -130,14 +137,26 @@ class BasePlugin:
             self._connection.Send(data.encode(), 1)
             Domoticz.Log("==> %s sent" %data.encode())
 
-        if self.command_state == 'Close Channel' and self.ack:
-            # Close
-            connection.Disconnect()
+        elif self.command_state == 'Close Channel' and self.ack:
+            # Close the connection and ready to take an other command
+            self._connection.Disconnect()
 
+            self.TimedOut = 0
             self.ack = False
             self.command_state = None
             self.command_trgt = None
             self.command_addr = None
+
+        if self.TimedOut  > 5:
+            # Close Connection
+            self._connection.Disconnect()
+
+            self.TimedOut = 0
+            self.ack = False
+            self.command_state = None
+            self.command_trgt = None
+            self.command_addr = None
+
 
         return
 
